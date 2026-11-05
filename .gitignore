@@ -1,4 +1,5 @@
 *.npz
+scripts/hilbert_padding_demo.png
 *.nwb
 *.pickle
 *.py.md5
