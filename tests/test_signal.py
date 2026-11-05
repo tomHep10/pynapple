@@ -2,8 +2,10 @@ import re
 from contextlib import nullcontext as does_not_raise
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.signal import hilbert
+from scipy.fft import next_fast_len
 
 import pynapple as nap
 
@@ -270,6 +272,84 @@ def test_detect_oscillatory_events(
 def test_hilbert_type_errors(input, func, expectation):
     with expectation:
         func(input)
+
+
+@pytest.mark.parametrize("padding", ["zero", "reflect"])
+@pytest.mark.parametrize(
+    "data",
+    [
+        nap.Tsd(
+            t=np.arange(12, dtype=float),
+            d=np.arange(12, dtype=float),
+            time_support=nap.IntervalSet([0, 7], [3, 11]),
+        ),
+        nap.TsdFrame(
+            t=np.arange(12, dtype=float),
+            d=np.stack([np.arange(12), np.arange(12) ** 2], axis=1),
+            time_support=nap.IntervalSet([0, 7], [3, 11]),
+            columns=["linear", "quadratic"],
+        ),
+    ],
+)
+def test_apply_hilbert_transform_per_interval(data, padding):
+    result = nap.apply_hilbert_transform(data, padding=padding)
+
+    assert isinstance(result, type(data))
+    np.testing.assert_array_equal(result.times(), data.times())
+    np.testing.assert_array_equal(result.time_support, data.time_support)
+    if isinstance(data, nap.TsdFrame):
+        np.testing.assert_array_equal(result.columns, data.columns)
+
+    for epoch in data.time_support:
+        slc = data.get_slice(epoch.start[0], epoch.end[0])
+        values = data.values[slc]
+        n_fft = next_fast_len(len(values))
+        if padding == "zero":
+            padded = np.pad(values, (0, n_fft - len(values)))
+        elif len(values) == 1:
+            padded = np.repeat(values, n_fft)
+        else:
+            padded = np.pad(values, (0, n_fft - len(values)), mode="reflect")
+        expected = hilbert(padded, axis=0)[: len(values)]
+        np.testing.assert_array_equal(result.values[slc], expected)
+
+
+@pytest.mark.parametrize("padding", ["zero", "reflect"])
+def test_hilbert_preserves_frame_metadata(padding):
+    data = nap.TsdFrame(
+        t=np.arange(8, dtype=float),
+        d=np.ones((8, 2)),
+        time_support=nap.IntervalSet([0, 5], [2, 7]),
+        columns=["left", "right"],
+        metadata={"unit": ["a", "b"]},
+    )
+
+    result = nap.apply_hilbert_transform(data, padding=padding)
+
+    np.testing.assert_array_equal(result.columns, data.columns)
+    pd.testing.assert_frame_equal(result.metadata, data.metadata)
+
+
+@pytest.mark.parametrize("func", [nap.apply_hilbert_transform, nap.compute_hilbert_envelope, nap.compute_hilbert_phase])
+def test_hilbert_invalid_padding(func):
+    data = nap.Tsd(t=[0, 1, 2], d=[1, 2, 3])
+    with pytest.raises(ValueError, match="padding must be either 'zero' or 'reflect'"):
+        func(data, padding="invalid")
+
+
+@pytest.mark.parametrize("padding", ["zero", "reflect"])
+@pytest.mark.parametrize("n_samples", [1, 2])
+def test_hilbert_short_epochs(padding, n_samples):
+    data = nap.Tsd(
+        t=np.arange(n_samples, dtype=float),
+        d=np.ones(n_samples),
+        time_support=nap.IntervalSet(0, n_samples - 1),
+    )
+
+    result = nap.apply_hilbert_transform(data, padding=padding)
+
+    assert result.shape == data.shape
+    assert np.all(np.isfinite(result.values))
 
 
 @pytest.mark.parametrize(

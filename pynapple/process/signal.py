@@ -9,7 +9,7 @@ import numpy as np
 import pynapple as nap
 
 
-def apply_hilbert_transform(data):
+def apply_hilbert_transform(data, padding="zero"):
     """
     Apply the Hilbert transform to a time-series.
 
@@ -21,6 +21,14 @@ def apply_hilbert_transform(data):
     ----------
     data : Tsd, TsdFrame
         The time-series to which the Hilbert transform will be applied.
+    padding : {"zero", "reflect"}, optional
+        Padding applied independently to each time-support interval before the
+        FFT. ``"zero"`` (the default) pads with zeros; ``"reflect"`` extends
+        the interval by reflecting its edge samples. Padding is cropped from
+        the result, so the output has the same timestamps and time support as
+        the input. Each interval is transformed independently, and therefore
+        values cannot leak across gaps. For a one-sample interval, reflected
+        padding falls back to edge-value padding.
 
     Returns
     -------
@@ -78,26 +86,55 @@ def apply_hilbert_transform(data):
     19.900000000000002   (0.8676441006416694+0.17871162129618953j)      (0.49718579487120196-0.09195658451657955j)
     dtype: complex128, shape: (200, 2)
     """
+    from scipy.fft import next_fast_len
     from scipy.signal import hilbert
+
+    if padding not in ("zero", "reflect"):
+        raise ValueError("padding must be either 'zero' or 'reflect'")
+    if not isinstance(data, (nap.Tsd, nap.TsdFrame)):
+        raise TypeError("data should be a Tsd or TsdFrame.")
+
+    def _transform(values):
+        n_samples = values.shape[0]
+        if n_samples == 0:
+            return values.astype(complex)
+        n_fft = next_fast_len(n_samples)
+        if n_fft == n_samples:
+            padded = values
+        elif padding == "zero":
+            padded = np.pad(values, ((0, n_fft - n_samples),) + ((0, 0),) * (values.ndim - 1))
+        elif n_samples == 1:
+            padded = np.repeat(values, n_fft, axis=0)
+        else:
+            padded = np.pad(
+                values,
+                ((0, n_fft - n_samples),) + ((0, 0),) * (values.ndim - 1),
+                mode="reflect",
+            )
+        return hilbert(padded, axis=0)[:n_samples]
+
+    out = np.empty(data.values.shape, dtype=np.result_type(data.values, complex))
+    for epoch in data.time_support:
+        slc = data.get_slice(start=epoch.start[0], end=epoch.end[0])
+        out[slc] = _transform(data.values[slc])
 
     if isinstance(data, nap.Tsd):
         return nap.Tsd(
-            d=hilbert(data.values),
+            d=out,
             t=data.times(),
             time_support=data.time_support,
         )
     elif isinstance(data, nap.TsdFrame):
         return nap.TsdFrame(
-            d=hilbert(data.values, axis=0),
+            d=out,
             t=data.times(),
             columns=data.columns,
+            metadata=data.metadata,
             time_support=data.time_support,
         )
-    else:
-        raise TypeError("data should be a Tsd or TsdFrame.")
 
 
-def compute_hilbert_envelope(data):
+def compute_hilbert_envelope(data, padding="zero"):
     """
     Compute the Hilbert envelope of a time-series.
 
@@ -109,6 +146,9 @@ def compute_hilbert_envelope(data):
     ----------
     data : Tsd, TsdFrame
         The time-series data to compute the Hilbert envelope for.
+    padding : {"zero", "reflect"}, optional
+        Padding mode passed to :func:`apply_hilbert_transform`. Defaults to
+        ``"zero"``.
 
     Returns
     -------
@@ -166,11 +206,11 @@ def compute_hilbert_envelope(data):
     19.900000000000002   0.885858  0.505618
     dtype: float64, shape: (200, 2)
     """
-    analytic_signal = apply_hilbert_transform(data)
+    analytic_signal = apply_hilbert_transform(data, padding=padding)
     return np.abs(analytic_signal)
 
 
-def compute_hilbert_phase(data):
+def compute_hilbert_phase(data, padding="zero"):
     """
     Compute the Hilbert phase of a time-series.
 
@@ -182,6 +222,9 @@ def compute_hilbert_phase(data):
     ----------
     data : Tsd, TsdFrame
         The time-series data to compute the Hilbert phase for.
+    padding : {"zero", "reflect"}, optional
+        Padding mode passed to :func:`apply_hilbert_transform`. Defaults to
+        ``"zero"``.
 
     Returns
     -------
@@ -239,10 +282,15 @@ def compute_hilbert_phase(data):
     19.900000000000002   0.885858  0.505618
     dtype: float64, shape: (200, 2)
     """
-    analytic_signal = apply_hilbert_transform(data)
+    analytic_signal = apply_hilbert_transform(data, padding=padding)
     phase = np.angle(analytic_signal)
-    phase = np.mod(np.unwrap(phase), 2 * np.pi)
-    return phase
+    unwrapped = np.empty_like(phase)
+    for epoch in data.time_support:
+        slc = data.get_slice(start=epoch.start[0], end=epoch.end[0])
+        unwrapped[slc] = np.unwrap(phase[slc], axis=0)
+    return data._define_instance(
+        data.times(), data.time_support, values=np.mod(unwrapped, 2 * np.pi)
+    )
 
 
 def detect_oscillatory_events(
